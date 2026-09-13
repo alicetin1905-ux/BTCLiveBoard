@@ -1590,12 +1590,17 @@
       reconnectDelay = 1000;
       setStatus('live');
       clearError();
-      var args = [];
+      /* One subscribe message per symbol, not one giant batch: Bybit rejects
+         the WHOLE request if any single topic in it is invalid/unavailable,
+         which would otherwise take every symbol's live price down together
+         over one bad topic (e.g. a newly-added coin briefly missing a
+         stream) instead of just that one. */
       SYMBOLS.forEach(function(s){
-        args.push('tickers.' + s.sym);
-        args.push('kline.' + INTERVAL + '.' + s.sym);
+        ws.send(JSON.stringify({ op: 'subscribe', args: [
+          'tickers.' + s.sym,
+          'kline.' + INTERVAL + '.' + s.sym
+        ] }));
       });
-      ws.send(JSON.stringify({ op: 'subscribe', args: args }));
       clearInterval(pingTimer);
       pingTimer = setInterval(function(){
         if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ op: 'ping' }));
@@ -1605,6 +1610,10 @@
     ws.onmessage = function(evt){
       var msg;
       try { msg = JSON.parse(evt.data); } catch (e){ return; }
+      if (msg.op === 'subscribe' && msg.success === false){
+        console.warn('Bybit rejected a subscribe request:', msg.ret_msg || msg);
+        return;
+      }
       if (!msg.topic || !msg.data) return;
 
       if (msg.topic.indexOf('tickers.') === 0){
