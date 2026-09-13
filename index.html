@@ -489,6 +489,8 @@
   var audioCtx = null;
   var historyReady = false; // suppresses the takeover on first load
   var lastTickerTs = 0;
+  var wsOpenedAt = 0;     // when the current socket opened; 0 while disconnected
+  var staleKicked = false; // forces at most one reconnect per silent episode
   var lastHeroPrice = null;
   var lastPriceString = '';
 
@@ -1588,7 +1590,13 @@
 
     ws.onopen = function(){
       reconnectDelay = 1000;
-      setStatus('live');
+      wsOpenedAt = Date.now();
+      staleKicked = false;
+      /* Don't claim 'live' just because the socket opened — that's what left
+         the board showing a green LIVE dot with every price blank: the
+         connection succeeded but no data ever actually arrived, and nothing
+         was watching for that. Stay 'connecting' until a real tick lands. */
+      setStatus('connecting');
       clearError();
       /* One subscribe message per symbol, not one giant batch: Bybit rejects
          the WHOLE request if any single topic in it is invalid/unavailable,
@@ -1632,8 +1640,10 @@
       }
     };
 
-    ws.onclose = function(){
+    ws.onclose = function(evt){
       clearInterval(pingTimer);
+      wsOpenedAt = 0;
+      if (evt && (evt.code !== 1000 || evt.reason)) console.warn('Bybit WS closed:', evt.code, evt.reason || '(no reason given)');
       setStatus('offline');
       scheduleReconnect();
     };
@@ -1674,9 +1684,24 @@
     els.countdown.textContent = '1H close in ' + pad(mins) + ':' + pad(secs);
     els.countdown.className = 'countdown' + (msLeft < 60000 ? ' closing' : '');
 
-    if (lastTickerTs && Date.now() - lastTickerTs > STALE_MS){
-      els.price.classList.add('stale');
-      setStatus('stale');
+    /* Watches for a socket that's OPEN but has gone quiet — including a
+       connection that never delivered its first tick at all, which
+       `lastTickerTs` alone can't see (it stays 0 forever in that case, so
+       the old `lastTickerTs && ...` check here never even ran). Falls back
+       to time-since-open when nothing has arrived yet, and force-closes the
+       socket once per silent episode so scheduleReconnect() gets a chance
+       to establish a working connection instead of sitting there silently. */
+    if (ws && ws.readyState === WebSocket.OPEN){
+      var lastAny = lastTickerTs || wsOpenedAt;
+      if (lastAny && Date.now() - lastAny > STALE_MS){
+        els.price.classList.add('stale');
+        setStatus('stale');
+        if (!staleKicked){
+          staleKicked = true;
+          console.warn('No live data for ' + Math.round((Date.now() - lastAny) / 1000) + 's on an open socket — forcing reconnect');
+          try { ws.close(); } catch (e){}
+        }
+      }
     }
   }
   tickClock();
