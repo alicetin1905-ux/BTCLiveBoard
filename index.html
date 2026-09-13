@@ -392,7 +392,7 @@
   <div class="topbar-left">
     <span class="pair-symbol" id="heroPair">BTC/USDT</span>
     <span class="pair-venue">Bybit &middot; Perpetual</span>
-    <span class="ce-badge">CE 4/2 &middot; 1H &middot; closed candles</span>
+    <span class="ce-badge">ATLAS 1H score &middot; closed candles</span>
   </div>
   <div class="topbar-right">
     <button class="sound-toggle" id="soundToggle" aria-pressed="false" title="Toggle sound (S)">
@@ -432,7 +432,7 @@
     <div class="stop-rail">
       <div class="stop-labels">
         <span>Chandelier stop <strong id="stopPrice">&mdash;</strong></span>
-        <span><strong id="stopDistance">&mdash;</strong> room before flip</span>
+        <span><strong id="stopDistance">&mdash;</strong> room to CE flip</span>
       </div>
       <div class="rail-track"><div class="rail-fill" id="railFill"></div></div>
     </div>
@@ -495,7 +495,12 @@
     state[s.sym] = {
       meta: s, ticker: {}, candles: [], live: null,
       ce: null, ema200: NaN, dir: 0, prevDir: 0,
-      flipIndex: -1, flipPrice: NaN, flipTime: 0
+      flipIndex: -1, flipPrice: NaN, flipTime: 0,
+      /* ATLAS 1H weighted verdict — this is what actually drives the
+         LONG/SHORT status now; ce/ema200 above stay purely for the stop-
+         distance rail. atlasDir: 1 long, -1 short, 0 stand aside. */
+      atlasCandles: [], atlasDaily: [], atlasOi: [], atlasRatio: null, atlasBook: null, atlasTape: null,
+      atlasScore: null, atlasDir: 0, atlasPrevDir: 0, atlasReady: false
     };
   });
 
@@ -583,6 +588,390 @@
   /* ============================================================
      Formatting
      ============================================================ */
+  /* ============================================================
+     AtlasScore — ATLAS's own weighted 1H verdict, ported here so the
+     Long/Short/Stand aside status on this board is driven by the same
+     scoring engine ATLAS uses, not a separate simpler read.
+
+     Every indicator function and the full Trend/Momentum/Structure/Flow
+     signal set below is copied verbatim from ATLAS's analyse() (same repo
+     family, alicetin1905-ux/ATLAS) — not reimplemented from memory — so a
+     given set of candles/tickers/orderbook/tape scores identically here and
+     there. Namespaced in its own object so none of its helpers (ema, rma,
+     atr, ...) collide with this file's own same-named CE-specific versions
+     above, which stay untouched and keep driving the chart + stop rail.
+
+     Trade-plan/sizing and the multi-timeframe-alignment panel are dropped —
+     neither feeds the score in ATLAS either (mtf is display-only there) —
+     leaving just what's needed for { score, dir }.
+
+     Keep this in sync by hand if ATLAS's analyse() ever changes; there is no
+     shared module between the two static, independently-deployed repos.
+     ============================================================ */
+  var AtlasScore = (function () {
+    var nn = function (x) { return x !== null && x !== undefined && !Number.isNaN(x); };
+
+    function sma(v, p) {
+      var o = Array(v.length).fill(null), s = 0;
+      for (var i = 0; i < v.length; i++) {
+        s += v[i]; if (i >= p) s -= v[i - p];
+        if (i >= p - 1) o[i] = s / p;
+      } return o;
+    }
+    function ema(v, p) {
+      var o = Array(v.length).fill(null), k = 2 / (p + 1), s = 0;
+      for (var i = 0; i < v.length; i++) {
+        if (i < p - 1) { s += v[i]; continue; }
+        if (i === p - 1) { s += v[i]; o[i] = s / p; continue; }
+        o[i] = v[i] * k + o[i - 1] * (1 - k);
+      } return o;
+    }
+    function rma(v, p) {
+      var o = Array(v.length).fill(null), s = 0, n = 0, started = false;
+      for (var i = 0; i < v.length; i++) {
+        if (!nn(v[i])) continue;
+        if (!started) {
+          s += v[i]; n++;
+          if (n === p) { o[i] = s / p; started = true; }
+          continue;
+        }
+        o[i] = (o[i - 1] * (p - 1) + v[i]) / p;
+      } return o;
+    }
+    function stdev(v, p) {
+      var o = Array(v.length).fill(null), m = sma(v, p);
+      for (var i = p - 1; i < v.length; i++) {
+        var s = 0; for (var k = i - p + 1; k <= i; k++) s += Math.pow(v[k] - m[i], 2);
+        o[i] = Math.sqrt(s / p);
+      } return o;
+    }
+    function highest(v, p) {
+      var o = Array(v.length).fill(null);
+      for (var i = p - 1; i < v.length; i++) { var m = -Infinity; for (var k = i - p + 1; k <= i; k++) m = Math.max(m, v[k]); o[i] = m; }
+      return o;
+    }
+    function lowest(v, p) {
+      var o = Array(v.length).fill(null);
+      for (var i = p - 1; i < v.length; i++) { var m = Infinity; for (var k = i - p + 1; k <= i; k++) m = Math.min(m, v[k]); o[i] = m; }
+      return o;
+    }
+    function linreg(v, p) {
+      var o = Array(v.length).fill(null);
+      for (var i = p - 1; i < v.length; i++) {
+        var sx = 0, sy = 0, sxy = 0, sxx = 0, ok = true;
+        for (var k = 0; k < p; k++) {
+          var y = v[i - p + 1 + k]; if (!nn(y)) { ok = false; break; }
+          sx += k; sy += y; sxy += k * y; sxx += k * k;
+        }
+        if (!ok) continue;
+        var d = p * sxx - sx * sx; if (d === 0) continue;
+        var slope = (p * sxy - sx * sy) / d, intercept = (sy - slope * sx) / p;
+        o[i] = intercept + slope * (p - 1);
+      } return o;
+    }
+    function trueRange(c) {
+      var o = Array(c.length).fill(null);
+      for (var i = 0; i < c.length; i++) {
+        o[i] = i === 0 ? c[i].h - c[i].l
+          : Math.max(c[i].h - c[i].l, Math.abs(c[i].h - c[i - 1].c), Math.abs(c[i].l - c[i - 1].c));
+      } return o;
+    }
+    var atr = function (c, p) { return rma(trueRange(c), p); };
+
+    function rsi(v, p) {
+      var g = Array(v.length).fill(null), l = Array(v.length).fill(null);
+      for (var i = 1; i < v.length; i++) { var d = v[i] - v[i - 1]; g[i] = Math.max(d, 0); l[i] = Math.max(-d, 0); }
+      var ag = rma(g, p), al = rma(l, p), o = Array(v.length).fill(null);
+      for (var j = 0; j < v.length; j++) {
+        if (!nn(ag[j])) continue;
+        o[j] = al[j] === 0 ? 100 : 100 - 100 / (1 + ag[j] / al[j]);
+      } return o;
+    }
+    function macd(v, f, s, sig) {
+      var ef = ema(v, f), es = ema(v, s), line = Array(v.length).fill(null);
+      for (var i = 0; i < v.length; i++) if (nn(ef[i]) && nn(es[i])) line[i] = ef[i] - es[i];
+      var first = line.findIndex(nn);
+      var sl = ema(line.slice(first).map(function (x) { return x || 0; }), sig);
+      var signal = Array(first).fill(null).concat(sl);
+      var hist = line.map(function (x, i) { return (nn(x) && nn(signal[i])) ? x - signal[i] : null; });
+      return { line: line, signal: signal, hist: hist };
+    }
+    function adx(c, p) {
+      var n = c.length, pdm = Array(n).fill(0), ndm = Array(n).fill(0);
+      for (var i = 1; i < n; i++) {
+        var up = c[i].h - c[i - 1].h, dn = c[i - 1].l - c[i].l;
+        pdm[i] = (up > dn && up > 0) ? up : 0;
+        ndm[i] = (dn > up && dn > 0) ? dn : 0;
+      }
+      var tr = rma(trueRange(c), p), sp = rma(pdm, p), sn = rma(ndm, p);
+      var pdi = Array(n).fill(null), ndi = Array(n).fill(null), dx = Array(n).fill(null);
+      for (var j = 0; j < n; j++) {
+        if (!nn(tr[j]) || tr[j] === 0) continue;
+        pdi[j] = 100 * sp[j] / tr[j]; ndi[j] = 100 * sn[j] / tr[j];
+        var sum = pdi[j] + ndi[j];
+        dx[j] = sum === 0 ? 0 : 100 * Math.abs(pdi[j] - ndi[j]) / sum;
+      }
+      return { adx: rma(dx, p), pdi: pdi, ndi: ndi };
+    }
+    function supertrend(c, p, mult) {
+      var n = c.length, a = atr(c, p), dir = Array(n).fill(null), st = Array(n).fill(null);
+      var fu = null, fl = null, prevDir = 1;
+      for (var i = 0; i < n; i++) {
+        if (!nn(a[i])) continue;
+        var basis = (c[i].h + c[i].l) / 2, up = basis + mult * a[i], lo = basis - mult * a[i];
+        fu = (fu === null || up < fu || c[i - 1].c > fu) ? up : fu;
+        fl = (fl === null || lo > fl || c[i - 1].c < fl) ? lo : fl;
+        var d = prevDir;
+        if (c[i].c > fu) d = 1; else if (c[i].c < fl) d = -1;
+        dir[i] = d; st[i] = d === 1 ? fl : fu; prevDir = d;
+      }
+      return { dir: dir, st: st };
+    }
+    function chandelier(c, len, mult) {
+      var n = c.length, closes = c.map(function (x) { return x.c; }), a = atr(c, len);
+      var hh = highest(closes, len), ll = lowest(closes, len);
+      var longStop = Array(n).fill(null), shortStop = Array(n).fill(null), dir = Array(n).fill(null);
+      var pl = null, ps = null, pd = 1;
+      for (var i = 0; i < n; i++) {
+        if (!nn(a[i]) || !nn(hh[i])) continue;
+        var ls = hh[i] - a[i] * mult, ss = ll[i] + a[i] * mult;
+        if (pl !== null) ls = c[i - 1].c > pl ? Math.max(ls, pl) : ls;
+        if (ps !== null) ss = c[i - 1].c < ps ? Math.min(ss, ps) : ss;
+        var d = pd;
+        if (ps !== null && c[i].c > ps) d = 1; else if (pl !== null && c[i].c < pl) d = -1;
+        longStop[i] = ls; shortStop[i] = ss; dir[i] = d;
+        pl = ls; ps = ss; pd = d;
+      }
+      return { longStop: longStop, shortStop: shortStop, dir: dir };
+    }
+    function zlsma(v, len) {
+      var l1 = linreg(v, len), l2 = linreg(l1, len), o = Array(v.length).fill(null);
+      for (var i = 0; i < v.length; i++) if (nn(l1[i]) && nn(l2[i])) o[i] = l1[i] + (l1[i] - l2[i]);
+      return o;
+    }
+    function stochRsi(v, rlen, slen, k, d) {
+      var r = rsi(v, rlen), n = v.length, raw = Array(n).fill(null);
+      var hi = highest(r.map(function (x) { return nn(x) ? x : 0; }), slen);
+      var lo = lowest(r.map(function (x) { return nn(x) ? x : 0; }), slen);
+      for (var i = 0; i < n; i++) {
+        if (!nn(r[i]) || !nn(hi[i])) continue;
+        raw[i] = hi[i] === lo[i] ? 50 : 100 * (r[i] - lo[i]) / (hi[i] - lo[i]);
+      }
+      var first = raw.findIndex(nn);
+      if (first < 0) return { k: raw, d: raw };
+      var kk = Array(first).fill(null).concat(sma(raw.slice(first), k));
+      var dd = Array(first).fill(null).concat(sma(kk.slice(first).map(function (x) { return nn(x) ? x : 0; }), d));
+      return { k: kk, d: dd };
+    }
+    function cci(c, p) {
+      var tp = c.map(function (x) { return (x.h + x.l + x.c) / 3; }), m = sma(tp, p), o = Array(c.length).fill(null);
+      for (var i = p - 1; i < c.length; i++) {
+        var dev = 0; for (var k = i - p + 1; k <= i; k++) dev += Math.abs(tp[k] - m[i]);
+        dev /= p; o[i] = dev === 0 ? 0 : (tp[i] - m[i]) / (0.015 * dev);
+      } return o;
+    }
+    function willr(c, p) {
+      var hi = highest(c.map(function (x) { return x.h; }), p), lo = lowest(c.map(function (x) { return x.l; }), p), o = Array(c.length).fill(null);
+      for (var i = 0; i < c.length; i++) if (nn(hi[i]) && hi[i] !== lo[i]) o[i] = -100 * (hi[i] - c[i].c) / (hi[i] - lo[i]);
+      return o;
+    }
+    function mfi(c, p) {
+      var n = c.length, pos = Array(n).fill(0), neg = Array(n).fill(0), o = Array(n).fill(null);
+      var tp = c.map(function (x) { return (x.h + x.l + x.c) / 3; });
+      for (var i = 1; i < n; i++) {
+        var f = tp[i] * c[i].v;
+        if (tp[i] > tp[i - 1]) pos[i] = f; else if (tp[i] < tp[i - 1]) neg[i] = f;
+      }
+      for (var j = p; j < n; j++) {
+        var sp = 0, sn = 0;
+        for (var k = j - p + 1; k <= j; k++) { sp += pos[k]; sn += neg[k]; }
+        o[j] = sn === 0 ? 100 : 100 - 100 / (1 + sp / sn);
+      } return o;
+    }
+    function obv(c) {
+      var o = Array(c.length).fill(0);
+      for (var i = 1; i < c.length; i++) o[i] = o[i - 1] + (c[i].c > c[i - 1].c ? c[i].v : c[i].c < c[i - 1].c ? -c[i].v : 0);
+      return o;
+    }
+    function bollinger(v, p, m) {
+      var b = sma(v, p), s = stdev(v, p);
+      return {
+        mid: b,
+        up: b.map(function (x, i) { return nn(x) ? x + m * s[i] : null; }),
+        dn: b.map(function (x, i) { return nn(x) ? x - m * s[i] : null; })
+      };
+    }
+    function keltner(c, p, m) {
+      var mid = ema(c.map(function (x) { return x.c; }), p), a = atr(c, p);
+      return {
+        mid: mid,
+        up: mid.map(function (x, i) { return nn(x) && nn(a[i]) ? x + m * a[i] : null; }),
+        dn: mid.map(function (x, i) { return nn(x) && nn(a[i]) ? x - m * a[i] : null; })
+      };
+    }
+    function ichimoku(c) {
+      var n = c.length, h = c.map(function (x) { return x.h; }), l = c.map(function (x) { return x.l; });
+      var mid = function (p) { var hi = highest(h, p), lo = lowest(l, p); return hi.map(function (x, i) { return nn(x) ? (x + lo[i]) / 2 : null; }); };
+      var tenkan = mid(9), kijun = mid(26), b = mid(52);
+      var spanA = tenkan.map(function (x, i) { return nn(x) && nn(kijun[i]) ? (x + kijun[i]) / 2 : null; });
+      var i = n - 1, s = i - 26;
+      return {
+        tenkan: tenkan[i], kijun: kijun[i],
+        cloudTop: s >= 0 && nn(spanA[s]) && nn(b[s]) ? Math.max(spanA[s], b[s]) : null,
+        cloudBot: s >= 0 && nn(spanA[s]) && nn(b[s]) ? Math.min(spanA[s], b[s]) : null
+      };
+    }
+    function vwapAnchored(c) {
+      var o = Array(c.length).fill(null);
+      var pv = 0, vv = 0, day = null;
+      for (var i = 0; i < c.length; i++) {
+        var d = new Date(c[i].t).getUTCDate();
+        if (d !== day) { pv = 0; vv = 0; day = d; }
+        var tp = (c[i].h + c[i].l + c[i].c) / 3;
+        pv += tp * c[i].v; vv += c[i].v;
+        o[i] = vv > 0 ? pv / vv : null;
+      } return o;
+    }
+    function structure(c) {
+      var hs = [], ls = [];
+      for (var i = 2; i < c.length - 2; i++) {
+        if (c[i].h > c[i - 1].h && c[i].h > c[i - 2].h && c[i].h > c[i + 1].h && c[i].h > c[i + 2].h) hs.push(c[i].h);
+        if (c[i].l < c[i - 1].l && c[i].l < c[i - 2].l && c[i].l < c[i + 1].l && c[i].l < c[i + 2].l) ls.push(c[i].l);
+      }
+      var h2 = hs.slice(-2), l2 = ls.slice(-2);
+      var dir = 0;
+      if (h2.length === 2 && l2.length === 2) {
+        var hh = h2[1] > h2[0], hl = l2[1] > l2[0];
+        if (hh && hl) dir = 1; else if (!hh && !hl) dir = -1; else dir = 0;
+      }
+      return { dir: dir };
+    }
+
+    /* ---- weighted verdict, mirroring ATLAS's analyse() Trend/Momentum/
+       Structure/Flow blocks and aggregate exactly (same signals, same
+       weights, same thresholds) — trade-plan/sizing/MTF panel dropped since
+       only { score, dir } is needed here. Any Flow input left null/empty is
+       simply skipped, exactly like ATLAS does when that data hasn't loaded
+       yet — the score still computes from whatever is available. ---- */
+    function compute(inputs) {
+      var c = inputs.candles1h;
+      if (!c || c.length < 220) return null;
+      var k = c.slice(0, -1);
+      var i = k.length - 1;
+      var close = k.map(function (x) { return x.c; });
+      var price = inputs.livePrice || k[i].c;
+      var sig = [];
+      var add = function (dir, weight) { sig.push({ dir: dir, weight: weight }); };
+
+      var e20 = ema(close, 20), e50 = ema(close, 50), e200 = ema(close, 200);
+      var stacked = e20[i] > e50[i] && e50[i] > e200[i] ? 1 : (e20[i] < e50[i] && e50[i] < e200[i] ? -1 : 0);
+      add(stacked, 8);
+      add(price > e200[i] ? 1 : -1, 6);
+
+      var st = supertrend(k, 10, 3);
+      add(st.dir[i], 7);
+
+      var ce = chandelier(k, 4, 2);
+      add(ce.dir[i], 7);
+
+      var zl = zlsma(close, 32);
+      var zlDir = price > zl[i] ? 1 : -1;
+      var zlSlope = zl[i] > zl[i - 3] ? 1 : -1;
+      add(zlDir === zlSlope ? zlDir : 0, 5);
+
+      var dm = adx(k, 14);
+      var adxV = dm.adx[i];
+      add(adxV < 20 ? 0 : (dm.pdi[i] > dm.ndi[i] ? 1 : -1), 5);
+
+      var ich = ichimoku(k);
+      var ichDir = 0;
+      if (nn(ich.cloudTop)) ichDir = price > ich.cloudTop ? 1 : price < ich.cloudBot ? -1 : 0;
+      add(ichDir, 5);
+
+      var r14 = rsi(close, 14);
+      add(r14[i] > 55 ? 1 : r14[i] < 45 ? -1 : 0, 6);
+      var md = macd(close, 12, 26, 9);
+      var mdDir = md.line[i] > md.signal[i] ? 1 : -1;
+      add((md.hist[i] > 0 ? 1 : -1) === mdDir ? mdDir : 0, 7);
+      var sr = stochRsi(close, 14, 14, 3, 3);
+      add(sr.k[i] > sr.d[i] && sr.k[i] < 80 ? 1 : sr.k[i] < sr.d[i] && sr.k[i] > 20 ? -1 : 0, 4);
+      var cc = cci(k, 20);
+      add(cc[i] > 100 ? 1 : cc[i] < -100 ? -1 : 0, 3);
+      var wr = willr(k, 14);
+      add(wr[i] > -50 ? 1 : -1, 3);
+      var roc = (close[i] / close[i - 10] - 1) * 100;
+      add(roc > 0.3 ? 1 : roc < -0.3 ? -1 : 0, 3);
+
+      var bb = bollinger(close, 20, 2), kc = keltner(k, 20, 1.5);
+      var pctB = (price - bb.dn[i]) / (bb.up[i] - bb.dn[i]);
+      add(pctB > 0.55 ? 1 : pctB < 0.45 ? -1 : 0, 3);
+      add(0, 2);   /* TTM squeeze — always neutral, dilutes the denominator like ATLAS */
+      var str = structure(k);
+      add(str.dir, 6);
+      var vw = vwapAnchored(k);
+      add(price > vw[i] ? 1 : -1, 4);
+
+      var d1 = inputs.dailyCandles;
+      if (d1 && d1.length > 2) {
+        var p = d1[d1.length - 2];
+        var P = (p.h + p.l + p.c) / 3;
+        add(price > P ? 1 : -1, 3);
+      }
+
+      var vAvg = sma(k.map(function (x) { return x.v; }), 20)[i];
+      add(0, 3);   /* Volume vs 20-avg — always neutral, same as ATLAS */
+      var ob = obv(k);
+      add(ob[i] > ob[i - 10] ? 1 : -1, 4);
+      var mf = mfi(k, 14);
+      add(mf[i] > 55 ? 1 : mf[i] < 45 ? -1 : 0, 3);
+
+      if (nn(inputs.fundingRate)) {
+        var f = inputs.fundingRate * 100;
+        var fDir = 0;
+        if (f > 0.03) fDir = -1;
+        else if (f < -0.02) fDir = 1;
+        else if (f > 0.005) fDir = 1;
+        else if (f < -0.005) fDir = -1;
+        add(fDir, 5);
+      }
+      if (inputs.oi && inputs.oi.length > 5) {
+        var oiNow = +inputs.oi[inputs.oi.length - 1].openInterest;
+        var oiPrev = +inputs.oi[0].openInterest;
+        var oiChg = (oiNow / oiPrev - 1) * 100;
+        var pChg = (price / k[Math.max(0, i - 24)].c - 1) * 100;
+        var oiDir = 0;
+        if (oiChg > 0.5 && pChg > 0) oiDir = 1;
+        else if (oiChg > 0.5 && pChg < 0) oiDir = -1;
+        add(oiDir, 5);
+      }
+      if (inputs.ratio) {
+        var lr = +inputs.ratio.buyRatio, sr2 = +inputs.ratio.sellRatio;
+        var skew = lr / (lr + sr2);
+        add(skew > 0.72 ? -1 : skew < 0.45 ? 1 : 0, 3);
+      }
+      if (inputs.book) {
+        var bid = inputs.book.b.reduce(function (s, x) { return s + +x[1]; }, 0);
+        var ask = inputs.book.a.reduce(function (s, x) { return s + +x[1]; }, 0);
+        var imb = (bid - ask) / (bid + ask);
+        add(imb > 0.08 ? 1 : imb < -0.08 ? -1 : 0, 3);
+      }
+      if (inputs.tape) {
+        var buy = inputs.tape.filter(function (t) { return t.S === 'Buy'; }).reduce(function (s, t) { return s + +t.v; }, 0);
+        var sell = inputs.tape.filter(function (t) { return t.S === 'Sell'; }).reduce(function (s, t) { return s + +t.v; }, 0);
+        var tot = buy + sell, pct = tot ? buy / tot : 0.5;
+        add(pct > 0.55 ? 1 : pct < 0.45 ? -1 : 0, 3);
+      }
+
+      var wsum = 0, totw = 0;
+      sig.forEach(function (s) { wsum += s.weight; totw += s.dir * s.weight; });
+      var score = Math.round(totw / wsum * 100);
+      var dir = score >= 25 ? 1 : score <= -25 ? -1 : 0;
+      return { score: score, dir: dir };
+    }
+
+    return { compute: compute };
+  })();
+
   function fmt(n, decimals){
     if (n === null || n === undefined || isNaN(n)) return null;
     return Number(n).toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
@@ -885,36 +1274,35 @@
   }
 
   function renderSignal(st, livePrice){
-    if (!st.ce || !st.candles.length){
+    /* Status word/colour/background now come from ATLAS's own weighted 1H
+       verdict (st.atlasDir), not the Chandelier Exit below — CE stays on
+       purely to show its own stop level on the rail as a reference, since
+       crossing it no longer flips the badge. */
+    if (!st.atlasReady){
       document.body.className = 'state-flat';
-      return;
-    }
-    var i = st.candles.length - 1;
-    var dir = st.ce.dir[i];
-    var dec = st.meta.decimals;
-    var stop = dir === 1 ? st.ce.longStop[i] : st.ce.shortStop[i];
-
-    document.body.className = dir === 1 ? 'state-long' : 'state-short';
-    els.signalName.textContent = dir === 1 ? 'LONG' : 'SHORT';
-
-    // signal age
-    if (st.flipIndex >= 0){
-      var bars = i - st.flipIndex;
-      var when = new Date(st.candles[st.flipIndex].start);
-      els.signalSince.textContent = 'since ' + pad(when.getHours()) + ':' + pad(when.getMinutes()) +
-        ' · ' + bars + (bars === 1 ? ' candle' : ' candles') +
-        ' · from ' + fmt(st.flipPrice, dec);
+      els.signalName.textContent = 'WAITING';
+      els.signalSince.textContent = 'loading ATLAS 1H score…';
     } else {
-      els.signalSince.textContent = 'no flip in loaded history';
+      var dir = st.atlasDir;
+      document.body.className = dir === 1 ? 'state-long' : dir === -1 ? 'state-short' : 'state-flat';
+      els.signalName.textContent = dir === 1 ? 'LONG' : dir === -1 ? 'SHORT' : 'STAND ASIDE';
+      els.signalSince.textContent = 'ATLAS 1H score ' + (st.atlasScore > 0 ? '+' : '') + st.atlasScore;
+
+      // EMA200 filter (HERALD rule: longs above, shorts below) — still a
+      // useful trend-context chip, now checked against ATLAS's direction.
+      var aligned = dir !== 0 && !isNaN(st.ema200) && (dir === 1 ? livePrice > st.ema200 : livePrice < st.ema200);
+      els.filterChip.textContent = (dir === 0 || isNaN(st.ema200)) ? 'EMA200 —'
+        : (aligned ? 'EMA200 aligned' : 'EMA200 against');
+      els.filterChip.className = 'filter-chip ' + (dir === 0 || isNaN(st.ema200) ? '' : aligned ? 'aligned' : 'against');
     }
 
-    // EMA200 filter (HERALD rule: longs above, shorts below)
-    var aligned = !isNaN(st.ema200) && (dir === 1 ? livePrice > st.ema200 : livePrice < st.ema200);
-    els.filterChip.textContent = isNaN(st.ema200) ? 'EMA200 —'
-      : (aligned ? 'EMA200 aligned' : 'EMA200 against');
-    els.filterChip.className = 'filter-chip ' + (isNaN(st.ema200) ? '' : aligned ? 'aligned' : 'against');
+    // Chandelier Exit 4/2 reference level — informational only now.
+    if (!st.ce || !st.candles.length) return;
+    var i = st.candles.length - 1;
+    var ceDir = st.ce.dir[i];
+    var dec = st.meta.decimals;
+    var stop = ceDir === 1 ? st.ce.longStop[i] : st.ce.shortStop[i];
 
-    // distance to the stop that would flip the signal
     els.stopPrice.textContent = fmt(stop, dec);
     if (!isNaN(livePrice) && !isNaN(stop)){
       var distPct = Math.abs(livePrice - stop) / livePrice * 100;
@@ -932,7 +1320,7 @@
       if (s.sym === heroSymbol) return;
       var st = state[s.sym];
       var t = st.ticker;
-      var dir = st.ce && st.candles.length ? st.ce.dir[st.candles.length - 1] : 0;
+      var dir = st.atlasReady ? st.atlasDir : 0;
       var color = dir === 1 ? 'var(--up)' : dir === -1 ? 'var(--down)' : 'var(--text-tertiary)';
 
       var tile = document.createElement('button');
@@ -989,7 +1377,7 @@
     els.takeoverWord.textContent = dir === 1 ? 'LONG' : 'SHORT';
     els.takeoverSub.textContent = meta.label + 'USDT.P  ·  ' + fmt(price, meta.decimals);
     var now = new Date();
-    els.takeoverTime.textContent = 'Chandelier Exit 4/2 · 1H close · ' + pad(now.getHours()) + ':' + pad(now.getMinutes());
+    els.takeoverTime.textContent = 'ATLAS 1H score · ' + pad(now.getHours()) + ':' + pad(now.getMinutes());
     els.takeover.classList.remove('show');
     void els.takeover.offsetWidth;
     els.takeover.classList.add('show');
@@ -1024,13 +1412,11 @@
       st.flipTime = st.candles[st.flipIndex].start;
     }
 
-    var flipped = st.dir !== 0 && newDir !== st.dir;
     st.prevDir = st.dir;
     st.dir = newDir;
-
-    if (flipped && announce && historyReady){
-      fireTakeover(sym, newDir, st.candles[last].close);
-    }
+    // Note: the full-screen takeover overlay is now driven by ATLAS's 1H
+    // verdict flips (see atlasRecompute) since that's the source of truth
+    // for the LONG/SHORT/STAND ASIDE badge — CE flips no longer fire it.
   }
 
   /* ============================================================
@@ -1061,16 +1447,105 @@
 
   function loadAllHistory(){
     return Promise.all(SYMBOLS.map(function(s){
-      return loadHistory(s.sym).catch(function(err){
-        console.warn('history failed for', s.sym, err);
-      });
+      return Promise.all([
+        loadHistory(s.sym).catch(function(err){ console.warn('history failed for', s.sym, err); }),
+        atlasLoadAll(s.sym).catch(function(err){ console.warn('ATLAS score data failed for', s.sym, err); })
+      ]);
     })).then(function(){
       historyReady = true;
       buildTiles();
       renderHero();
       var n = state[heroSymbol].candles.length;
-      els.sourceNote.textContent = 'Bybit V5 · ' + n + ' closed 1H candles · CE 4/2 + EMA200';
+      els.sourceNote.textContent = 'Bybit V5 · ' + n + ' closed 1H candles · ATLAS 1H score (CE 4/2 + EMA200 shown on the rail)';
     });
+  }
+
+  /* ============================================================
+     ATLAS 1H score — data layer
+     Mirrors ATLAS's own fetches (same endpoints/params) so the inputs, and
+     therefore the score, match exactly. Kept fully separate from the CE
+     candles/fetch above: different shape ({t,o,h,l,c,v} incl. volume, which
+     the CE path never needed), and independently retriable — one symbol's
+     order-book hiccup here can't touch the chart or stop rail.
+     ============================================================ */
+  var ATLAS_API = 'https://api.bybit.com';
+  function atlasApi(path){
+    return fetch(ATLAS_API + path).then(function(r){ return r.json(); }).then(function(d){
+      if (d.retCode !== 0) throw new Error(d.retMsg || 'API error');
+      return d.result;
+    });
+  }
+  function atlasFetchKlines(symbol, interval, limit){
+    return atlasApi('/v5/market/kline?category=linear&symbol=' + symbol + '&interval=' + interval + '&limit=' + limit)
+      .then(function(r){
+        return r.list.map(function(k){
+          return { t: +k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[5] };
+        }).sort(function(a, b){ return a.t - b.t; });
+        // deliberately NOT dropping the forming candle here — AtlasScore.compute()
+        // does that itself (k.slice(0,-1)), exactly like ATLAS's own analyse().
+      });
+  }
+
+  function atlasLoadAll(sym){
+    var st = state[sym];
+    return Promise.all([
+      atlasFetchKlines(sym, INTERVAL, 500).then(function(c){ st.atlasCandles = c; }),
+      atlasFetchKlines(sym, 'D', 30).then(function(c){ st.atlasDaily = c; }),
+      atlasApi('/v5/market/open-interest?category=linear&symbol=' + sym + '&intervalTime=1h&limit=24')
+        .then(function(r){ st.atlasOi = r.list.slice().reverse(); })
+        .catch(function(){ st.atlasOi = []; }),
+      atlasApi('/v5/market/account-ratio?category=linear&symbol=' + sym + '&period=1h&limit=1')
+        .then(function(r){ st.atlasRatio = r.list[0] || null; })
+        .catch(function(){ st.atlasRatio = null; }),
+      atlasApi('/v5/market/orderbook?category=linear&symbol=' + sym + '&limit=200')
+        .then(function(r){ st.atlasBook = r; })
+        .catch(function(){ st.atlasBook = null; }),
+      atlasApi('/v5/market/recent-trade?category=linear&symbol=' + sym + '&limit=500')
+        .then(function(r){ st.atlasTape = r.list; })
+        .catch(function(){ st.atlasTape = null; })
+    ]).then(function(){ atlasRecompute(sym, false); });
+  }
+
+  /* Re-fetches everything and rescoring for one symbol — called whenever its
+     1H candle closes, the same moment the CE side already recomputes. */
+  function atlasRefresh(sym, announce){
+    return atlasLoadAll(sym).then(function(){
+      if (announce) atlasRecompute(sym, true);
+    });
+  }
+
+  function atlasRecompute(sym, announce){
+    var st = state[sym];
+    var livePrice = parseFloat(st.ticker.lastPrice);
+    var fundingRate = st.ticker.fundingRate != null && st.ticker.fundingRate !== '' ? +st.ticker.fundingRate : null;
+    var result = AtlasScore.compute({
+      candles1h: st.atlasCandles,
+      dailyCandles: st.atlasDaily,
+      livePrice: isNaN(livePrice) ? undefined : livePrice,
+      fundingRate: fundingRate,
+      oi: st.atlasOi,
+      ratio: st.atlasRatio,
+      book: st.atlasBook,
+      tape: st.atlasTape
+    });
+    if (!result) return;
+
+    var newDir = result.dir;
+    var flipped = st.atlasReady && newDir !== st.atlasDir;
+    st.atlasPrevDir = st.atlasDir;
+    st.atlasDir = newDir;
+    st.atlasScore = result.score;
+    st.atlasReady = true;
+
+    if (flipped && announce && historyReady && newDir !== 0){
+      var last = st.candles[st.candles.length - 1];
+      fireTakeover(sym, newDir, last ? last.close : livePrice);
+    }
+    /* buildTiles() rebuilds every tile's signal state from scratch (updateTile()
+       only patches price/change text, not the Long/Short label), and is cheap
+       for 4 tiles — simpler than tracking which single tile needs a full redraw. */
+    if (sym === heroSymbol) renderHero();
+    buildTiles();
   }
 
   function applyKline(sym, k){
@@ -1091,6 +1566,10 @@
         if (sym === heroSymbol) playCandleClose();
         buildTiles();
         renderHero();
+        /* A new 1H bar just closed — the natural moment to re-score, same
+           cadence the CE side just recomputed on. Async; renders again once
+           the fresh candles/funding/OI/book/tape are in. */
+        atlasRefresh(sym, true).catch(function(err){ console.warn('ATLAS rescore failed for', sym, err); });
       } else if (lastCandle && start === lastCandle.start){
         st.candles[st.candles.length - 1] = candle;
         recompute(sym, true);
