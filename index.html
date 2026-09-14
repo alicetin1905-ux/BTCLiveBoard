@@ -408,9 +408,6 @@
       </svg>
       <span id="soundLabel">Sound off</span>
     </button>
-    <button class="sound-toggle" id="alertsToggle" aria-pressed="false" title="Notify on a Long/Short flip">
-      <span id="alertsLabel">Alerts off</span>
-    </button>
     <div class="status">
       <span class="status-dot" id="statusDot"></span>
       <span id="statusText">Connecting</span>
@@ -451,7 +448,6 @@
 
 <div class="footer layer">
   <div class="hint">Tap a tile to promote</div>
-  <div class="hint" id="alertsHint"></div>
   <div class="countdown" id="countdown">1H close in --:--</div>
   <div id="sourceNote">Bybit V5 public API &middot; connecting&hellip;</div>
 </div>
@@ -1092,9 +1088,6 @@
     soundLabel: document.getElementById('soundLabel'),
     waveOn: document.getElementById('waveOn'),
     waveOff: document.getElementById('waveOff'),
-    alertsToggle: document.getElementById('alertsToggle'),
-    alertsLabel: document.getElementById('alertsLabel'),
-    alertsHint: document.getElementById('alertsHint'),
     takeover: document.getElementById('takeover'),
     takeoverWord: document.getElementById('takeoverWord'),
     takeoverSub: document.getElementById('takeoverSub'),
@@ -1369,68 +1362,6 @@
     });
   }
 
-  /* ---------------- alerts: notify on a Long/Short flip ----------------
-     Reuses atlasRecompute's existing flip detection (the same signal that
-     already drives the takeover overlay for every symbol, not just hero)
-     rather than tracking flips separately — one source of truth. */
-  var WATCH_KEY = 'btcliveboard-watch-v1';
-  var watch = { on: false, sys: false };
-  function watchLoad(){
-    try {
-      var j = JSON.parse(localStorage.getItem(WATCH_KEY) || '{}');
-      if (typeof j.on === 'boolean') watch.on = j.on;
-    } catch (e) {}
-    watch.sys = typeof Notification !== 'undefined' && Notification.permission === 'granted';
-  }
-  function watchSave(){
-    try { localStorage.setItem(WATCH_KEY, JSON.stringify({ on: watch.on })); } catch (e) {}
-  }
-  function fireWatch(sym, dir, score){
-    if (!watch.sys) return;
-    var meta = state[sym].meta;
-    var title = 'BTCLiveBoard — ' + meta.label + ' 1H';
-    var body = (dir === 1 ? 'LONG' : 'SHORT') + ' · ATLAS score ' + (score > 0 ? '+' : '') + score;
-    try {
-      var n = new Notification(title, { body: body, tag: 'btcliveboard-' + sym, renotify: false });
-      n.onclick = function(){
-        try { window.focus(); } catch (e) {}
-        if (window.self !== window.top) {
-          try { window.parent.postMessage({ type: 'btcliveboard-goto', symbolId: sym }, location.origin); }
-          catch (e) {}
-        }
-        promote(sym);
-        n.close();
-      };
-    } catch (e) {}
-  }
-  function paintWatchUi(){
-    els.alertsToggle.classList.toggle('on', watch.on);
-    els.alertsLabel.textContent = watch.on ? 'Alerts on' : 'Alerts off';
-    els.alertsToggle.setAttribute('aria-pressed', String(watch.on));
-    if (!watch.on) { els.alertsHint.textContent = ''; return; }
-    var iOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-    var standalone = window.navigator.standalone === true ||
-      (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
-    if (!watch.sys) {
-      els.alertsHint.textContent = iOS && !standalone
-        ? 'No system notifications in a plain Safari tab — add this to the Home Screen and open it from there to get real alerts.'
-        : 'System notifications are blocked or not permitted in this browser.';
-    } else {
-      els.alertsHint.textContent = 'Watching all ' + SYMBOLS.length + ' coins — a notification fires the moment any one crosses into Long or Short.';
-    }
-  }
-  async function toggleWatch(){
-    if (watch.on) { watch.on = false; watchSave(); paintWatchUi(); return; }
-    watch.on = true;
-    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
-      try { await Notification.requestPermission(); } catch (e) {}
-    }
-    watch.sys = typeof Notification !== 'undefined' && Notification.permission === 'granted';
-    watchSave();
-    paintWatchUi();
-  }
-  els.alertsToggle.addEventListener('click', toggleWatch);
-
   function promote(sym){
     if (sym === heroSymbol) return;
     heroSymbol = sym;
@@ -1636,7 +1567,6 @@
     if (flipped && announce && historyReady && newDir !== 0){
       var last = st.candles[st.candles.length - 1];
       fireTakeover(sym, newDir, last ? last.close : livePrice);
-      if (watch.on) fireWatch(sym, newDir, result.score);
     }
     /* buildTiles() rebuilds every tile's signal state from scratch (updateTile()
        only patches price/change text, not the Long/Short label), and is cheap
@@ -1823,8 +1753,6 @@
   /* ============================================================
      Boot
      ============================================================ */
-  watchLoad();
-  paintWatchUi();
   applyPrice('---,---.-');   // board at rest, waiting for the first tick
   buildTiles();
   loadAllHistory()
