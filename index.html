@@ -21,6 +21,7 @@
     --flat: #ffc857;
     --signal: #ffc857;
     --signal-soft: rgba(255,200,87,0.09);
+    --trend-glow: rgba(255,200,87,0.04);  /* live BTC trend, independent of --signal (that's the viewed coin's own status) */
     --u: min(1vw, 1.9vh);   /* layout unit: scales with the screen, guarded by height */
     --mono: 'JetBrains Mono','SF Mono',Consolas,monospace;
     --sans: 'Inter',system-ui,sans-serif;
@@ -48,12 +49,14 @@
     position: relative;
   }
 
-  /* ambient wash — the whole screen carries the regime colour */
+  /* ambient wash — carries BTC's own live trend (green=long/red=short,
+     brighter the stronger the trend), independent of whatever coin is on
+     screen right now (that's --signal, used elsewhere on this page). */
   .wash{
     position: fixed; inset: 0; z-index: 0; pointer-events: none;
     background:
-      radial-gradient(ellipse 130% 80% at 50% -10%, var(--signal-soft), transparent 60%),
-      radial-gradient(ellipse 120% 70% at 50% 110%, var(--signal-soft), transparent 62%);
+      radial-gradient(ellipse 130% 80% at 50% -10%, var(--trend-glow), transparent 60%),
+      radial-gradient(ellipse 120% 70% at 50% 110%, var(--trend-glow), transparent 62%);
     transition: background 1.4s ease;
   }
   .scanlines{
@@ -1390,6 +1393,23 @@
   /* ============================================================
      Indicator recompute
      ============================================================ */
+  /* Background wash colour: BTC's own trend, always — not whatever coin is
+     currently the hero. Direction from price vs EMA200; intensity from how
+     many ATRs price has stretched away from it (saturates at 4 ATRs), so a
+     grinding chop near EMA200 stays dim and a strong trend glows brighter. */
+  function updateTrendGlow(candles, ema200){
+    if (isNaN(ema200) || candles.length < 15) return;
+    var atrSeries = rma(trueRange(candles), 14);
+    var atrNow = atrSeries[atrSeries.length - 1];
+    if (isNaN(atrNow) || atrNow <= 0) return;
+    var price = candles[candles.length - 1].close;
+    var dir = price >= ema200 ? 1 : -1;
+    var strength = Math.max(0, Math.min(1, Math.abs(price - ema200) / (atrNow * 4)));
+    var rgb = dir === 1 ? '53,255,176' : '255,77,106';
+    var alpha = (0.03 + strength * 0.15).toFixed(3);
+    document.documentElement.style.setProperty('--trend-glow', 'rgba(' + rgb + ',' + alpha + ')');
+  }
+
   function recompute(sym, announce){
     var st = state[sym];
     if (st.candles.length < Math.max(CE_LENGTH + 2, 20)) return;
@@ -1400,6 +1420,7 @@
 
     st.ce = ce;
     st.ema200 = e[e.length - 1];
+    if (sym === 'BTCUSDT') updateTrendGlow(st.candles, st.ema200);
 
     var last = ce.dir.length - 1;
     var newDir = ce.dir[last];
