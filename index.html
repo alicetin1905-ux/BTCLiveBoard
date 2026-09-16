@@ -1182,14 +1182,17 @@
   }
 
   /* The board is sized to the screen rather than to a fixed ceiling: measure the
-     cards at a known size, then scale so they fill the width they're given. */
+     cards at a known size, then scale so they fill the width they're given.
+     ZOOM steps this down one notch from a full fill (0.94/0.40) so the price
+     has breathing room by default instead of running edge to edge. */
+  var ZOOM = 0.90;
   function fitBoard(){
     if (!els.price.children.length) return;
     els.price.style.fontSize = '100px';
     var natural = els.price.scrollWidth;
     if (!natural) return;
-    var availW = els.price.parentElement.clientWidth * 0.94;
-    var availH = window.innerHeight * 0.40;
+    var availW = els.price.parentElement.clientWidth * 0.94 * ZOOM;
+    var availH = window.innerHeight * 0.40 * ZOOM;
     var size = Math.min(100 * (availW / natural), availH / 1.2);
     els.price.style.fontSize = Math.max(28, Math.min(size, 900)).toFixed(1) + 'px';
   }
