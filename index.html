@@ -124,10 +124,16 @@
     font-size: max(12px, calc(var(--u) * 1.25)); color: var(--text-secondary);
   }
 
-  /* ---------------- centre ---------------- */
+  /* ---------------- centre ----------------
+     space-evenly (not center) so the label/price/change/signal-card group
+     spreads out to use whatever vertical room .center actually has, instead
+     of bunching together in the middle of it and leaving equal empty bands
+     above and below — most noticeable on states with less to show (no open
+     position) and on taller phones, where .center's leftover space is a lot
+     bigger than this small a group needs to simply center itself. */
   .center{
     flex: 1; display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
+    align-items: center; justify-content: space-evenly;
     gap: max(6px, calc(var(--u) * 1)); text-align: center; min-height: 0;
   }
 
@@ -1182,17 +1188,14 @@
   }
 
   /* The board is sized to the screen rather than to a fixed ceiling: measure the
-     cards at a known size, then scale so they fill the width they're given.
-     ZOOM steps this down one notch from a full fill (0.94/0.40) so the price
-     has breathing room by default instead of running edge to edge. */
-  var ZOOM = 0.90;
+     cards at a known size, then scale so they fill the width they're given. */
   function fitBoard(){
     if (!els.price.children.length) return;
     els.price.style.fontSize = '100px';
     var natural = els.price.scrollWidth;
     if (!natural) return;
-    var availW = els.price.parentElement.clientWidth * 0.94 * ZOOM;
-    var availH = window.innerHeight * 0.40 * ZOOM;
+    var availW = els.price.parentElement.clientWidth * 0.94;
+    var availH = window.innerHeight * 0.40;
     var size = Math.min(100 * (availW / natural), availH / 1.2);
     els.price.style.fontSize = Math.max(28, Math.min(size, 900)).toFixed(1) + 'px';
   }
