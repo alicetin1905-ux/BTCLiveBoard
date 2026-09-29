@@ -1452,6 +1452,10 @@
     els.price.textContent = '';
     buildTiles();
     renderHero();
+    /* bring the big price back into view — the tap usually comes from far
+       down the tile list (and on iOS the page itself can be scrolled too) */
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    els.tiles.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   /* ---------- takeover ---------- */
