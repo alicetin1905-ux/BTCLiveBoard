@@ -444,7 +444,7 @@
     <div class="signal-head">
       <div class="signal-name"><span class="led" id="led"></span><span id="signalName">WAITING</span></div>
       <div class="signal-meta">
-        <div id="signalSince">loading 1H history&hellip;</div>
+        <div id="signalSince">loading 4H history&hellip;</div>
         <div><span class="filter-chip" id="filterChip">EMA200 &mdash;</span></div>
       </div>
     </div>
@@ -462,7 +462,7 @@
 
 <div class="footer layer">
   <div class="hint">Tap a tile to promote</div>
-  <div class="countdown" id="countdown">1H close in --:--</div>
+  <div class="countdown" id="countdown">4H close in --:--:--</div>
   <div id="sourceNote">Bybit V5 public API &middot; connecting&hellip;</div>
 </div>
 
@@ -484,8 +484,8 @@
   var CE_LENGTH = 4;        // Chandelier Exit ATR period
   var CE_MULT = 2;          // Chandelier Exit ATR multiplier
   var EMA_LENGTH = 200;     // trend filter
-  var INTERVAL = '60';      // 1H
-  var CANDLE_MS = 3600000;
+  var INTERVAL = '240';     // 4H — same timeframe as the ATLAS score driving the board
+  var CANDLE_MS = 4 * 3600000;
   var REST_BASE = 'https://api.bybit.com/v5/market/kline';
   var WS_URL = 'wss://stream.bybit.com/v5/public/linear';
   var STALE_MS = 12000;
@@ -1565,7 +1565,7 @@
       buildTiles();
       renderHero();
       var n = state[heroSymbol].candles.length;
-      els.sourceNote.textContent = 'Bybit V5 · ' + n + ' closed 1H candles · ATLAS 4H score (CE 4/2 + EMA200 on 1H shown on the rail)';
+      els.sourceNote.textContent = 'Bybit V5 · ' + n + ' closed 4H candles · ATLAS 4H score (CE 4/2 + EMA200 shown on the rail)';
     });
   }
 
@@ -1619,10 +1619,9 @@
     ]).then(function(){ atlasRecompute(sym, !!announce); });
   }
 
-  /* Re-fetches everything and rescoring for one symbol — called whenever its
-     1H candle closes, the same moment the CE side already recomputes (the
-     4H score only moves on a 4H close, but its live price and flow inputs
-     refresh every hour, as they do on ATLAS).
+  /* Re-fetches everything and rescores one symbol — called whenever its 4H
+     candle closes (the same moment the CE side recomputes), and hourly in
+     between so the score's flow inputs (funding, OI, book, tape) stay fresh.
      announce flows straight into the single atlasRecompute call inside
      atlasLoadAll — an earlier version called atlasRecompute a second time
      here, which meant the flip had already been silently applied by the
@@ -1687,7 +1686,7 @@
         if (sym === heroSymbol) playCandleClose();
         buildTiles();
         renderHero();
-        /* A new 1H bar just closed — the natural moment to re-score, same
+        /* A new 4H bar just closed — the natural moment to re-score, same
            cadence the CE side just recomputed on. Async; renders again once
            the fresh candles/funding/OI/book/tape are in. */
         atlasRefresh(sym, true).catch(function(err){ console.warn('ATLAS rescore failed for', sym, err); });
@@ -1748,7 +1747,7 @@
         Object.assign(state[tsym].ticker, msg.data);
         /* the boot score is computed before the socket even connects, so it
            has no live price or funding rate — rescore once when they arrive
-           instead of waiting up to an hour for the next 1H close */
+           instead of waiting for the next hourly rescore */
         if (state[tsym].atlasReady && !state[tsym].atlasHadTicker) atlasRecompute(tsym, false);
         lastTickerTs = Date.now();
         setStatus('live');
@@ -1801,9 +1800,10 @@
 
     var msIntoCandle = now.getTime() % CANDLE_MS;
     var msLeft = CANDLE_MS - msIntoCandle;
-    var mins = Math.floor(msLeft / 60000);
+    var hrs = Math.floor(msLeft / 3600000);
+    var mins = Math.floor((msLeft % 3600000) / 60000);
     var secs = Math.floor((msLeft % 60000) / 1000);
-    els.countdown.textContent = '1H close in ' + pad(mins) + ':' + pad(secs);
+    els.countdown.textContent = '4H close in ' + hrs + ':' + pad(mins) + ':' + pad(secs);
     els.countdown.className = 'countdown' + (msLeft < 60000 ? ' closing' : '');
 
     /* Watches for a socket that's OPEN but has gone quiet — including a
@@ -1855,9 +1855,15 @@
   buildTiles();
   loadAllHistory()
     .catch(function(err){
-      showError('Could not load 1H history: ' + err.message);
+      showError('Could not load 4H history: ' + err.message);
     })
     .then(function(){ connect(); });
+  /* hourly rescore between 4H closes, for fresh flow inputs */
+  setInterval(function(){
+    SYMBOLS.forEach(function(s){
+      atlasRefresh(s.sym, true).catch(function(err){ console.warn('ATLAS rescore failed for', s.sym, err); });
+    });
+  }, 3600000);
 })();
 </script>
 
