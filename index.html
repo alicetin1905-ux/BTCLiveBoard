@@ -411,7 +411,7 @@
   <div class="topbar-left">
     <span class="pair-symbol" id="heroPair">BTC/USDT</span>
     <span class="pair-venue">Bybit &middot; Perpetual</span>
-    <span class="ce-badge">ATLAS 1H score &middot; closed candles</span>
+    <span class="ce-badge">ATLAS 4H score &middot; closed candles</span>
   </div>
   <div class="topbar-right">
     <button class="sound-toggle" id="soundToggle" aria-pressed="false" title="Toggle sound (S)">
@@ -538,10 +538,10 @@
       meta: s, ticker: {}, candles: [], live: null,
       ce: null, ema200: NaN, dir: 0, prevDir: 0,
       flipIndex: -1, flipPrice: NaN, flipTime: 0,
-      /* ATLAS 1H weighted verdict — this is what actually drives the
+      /* ATLAS 4H weighted verdict — this is what actually drives the
          LONG/SHORT status now; ce/ema200 above stay purely for the stop-
          distance rail. atlasDir: 1 long, -1 short, 0 stand aside. */
-      atlasCandles: [], atlasDaily: [], atlasOi: [], atlasRatio: null, atlasBook: null, atlasTape: null,
+      atlas4h: [], atlasDaily: [], atlasOi: [], atlasRatio: null, atlasBook: null, atlasTape: null,
       atlasScore: null, atlasDir: 0, atlasPrevDir: 0, atlasReady: false
     };
   });
@@ -631,7 +631,7 @@
      Formatting
      ============================================================ */
   /* ============================================================
-     AtlasScore — ATLAS's own weighted 1H verdict, ported here so the
+     AtlasScore — ATLAS's own weighted 4H verdict, ported here so the
      Long/Short/Stand aside status on this board is driven by the same
      scoring engine ATLAS uses, not a separate simpler read.
 
@@ -645,7 +645,7 @@
 
      Trade-plan/sizing is dropped (it doesn't feed the score), leaving just
      what's needed for { score, dir }. The multi-timeframe read DOES feed
-     ATLAS's score (it trims it on disagreement), so 30m and 4H candles
+     ATLAS's score (it trims it on disagreement), so 30m and 1H candles
      are fetched here too, and daily history deep enough for its 1D read.
 
      Keep this in sync by hand if ATLAS's analyse() ever changes; there is no
@@ -905,7 +905,7 @@
     }
 
     function compute(inputs) {
-      var c = inputs.candles1h;
+      var c = inputs.candles;   // the score's own timeframe (4H here)
       if (!c || c.length < 220) return null;
       var k = c.slice(0, -1);
       var i = k.length - 1;
@@ -1038,7 +1038,7 @@
       var raw = gsum ? gtot / gsum : 0;
 
       /* --- multi-timeframe trim: 30m / 1H / 4H / 1D, only those with data --- */
-      var reads = [inputs.candles30m, c, inputs.candles4h, inputs.dailyCandles].map(mtfRead)
+      var reads = [inputs.candles30m, inputs.candles1h, inputs.candles4h, inputs.dailyCandles].map(mtfRead)
         .filter(function (x) { return x !== null; });
       var lean = reads.length ? reads.reduce(function (s, x) { return s + x / 4; }, 0) / reads.length : 0;
       var factor = 1 - MTF_MAX_TRIM * Math.max(0, -lean * Math.sign(raw));
@@ -1361,19 +1361,19 @@
   }
 
   function renderSignal(st, livePrice){
-    /* Status word/colour/background now come from ATLAS's own weighted 1H
+    /* Status word/colour/background now come from ATLAS's own weighted 4H
        verdict (st.atlasDir), not the Chandelier Exit below — CE stays on
        purely to show its own stop level on the rail as a reference, since
        crossing it no longer flips the badge. */
     if (!st.atlasReady){
       document.body.className = 'state-flat';
       els.signalName.textContent = 'WAITING';
-      els.signalSince.textContent = 'loading ATLAS 1H score…';
+      els.signalSince.textContent = 'loading ATLAS 4H score…';
     } else {
       var dir = st.atlasDir;
       document.body.className = dir === 1 ? 'state-long' : dir === -1 ? 'state-short' : 'state-flat';
       els.signalName.textContent = dir === 1 ? 'LONG' : dir === -1 ? 'SHORT' : 'STAND ASIDE';
-      els.signalSince.textContent = 'ATLAS 1H score ' + (st.atlasScore > 0 ? '+' : '') + st.atlasScore;
+      els.signalSince.textContent = 'ATLAS 4H score ' + (st.atlasScore > 0 ? '+' : '') + st.atlasScore;
 
       // EMA200 filter (HERALD rule: longs above, shorts below) — still a
       // useful trend-context chip, now checked against ATLAS's direction.
@@ -1468,7 +1468,7 @@
     els.takeoverWord.textContent = dir === 1 ? 'LONG' : 'SHORT';
     els.takeoverSub.textContent = meta.label + 'USDT.P  ·  ' + fmt(price, meta.decimals);
     var now = new Date();
-    els.takeoverTime.textContent = 'ATLAS 1H score · ' + pad(now.getHours()) + ':' + pad(now.getMinutes());
+    els.takeoverTime.textContent = 'ATLAS 4H score · ' + pad(now.getHours()) + ':' + pad(now.getMinutes());
     els.takeover.classList.remove('show');
     void els.takeover.offsetWidth;
     els.takeover.classList.add('show');
@@ -1523,7 +1523,7 @@
 
     st.prevDir = st.dir;
     st.dir = newDir;
-    // Note: the full-screen takeover overlay is now driven by ATLAS's 1H
+    // Note: the full-screen takeover overlay is now driven by ATLAS's 4H
     // verdict flips (see atlasRecompute) since that's the source of truth
     // for the LONG/SHORT/STAND ASIDE badge — CE flips no longer fire it.
   }
@@ -1565,12 +1565,12 @@
       buildTiles();
       renderHero();
       var n = state[heroSymbol].candles.length;
-      els.sourceNote.textContent = 'Bybit V5 · ' + n + ' closed 1H candles · ATLAS 1H score (CE 4/2 + EMA200 shown on the rail)';
+      els.sourceNote.textContent = 'Bybit V5 · ' + n + ' closed 1H candles · ATLAS 4H score (CE 4/2 + EMA200 on 1H shown on the rail)';
     });
   }
 
   /* ============================================================
-     ATLAS 1H score — data layer
+     ATLAS 4H score — data layer
      Mirrors ATLAS's own fetches (same endpoints/params) so the inputs, and
      therefore the score, match exactly. Kept fully separate from the CE
      candles/fetch above: different shape ({t,o,h,l,c,v} incl. volume, which
@@ -1598,10 +1598,11 @@
   function atlasLoadAll(sym, announce){
     var st = state[sym];
     return Promise.all([
-      atlasFetchKlines(sym, INTERVAL, 500).then(function(c){ st.atlasCandles = c; }),
-      // 30m / 4H / deep daily feed the multi-timeframe trim, same as ATLAS
-      atlasFetchKlines(sym, '30', 500).then(function(c){ st.atlas30m = c; }),
+      // 4H is the score's own timeframe (what TradeBot enters on); 30m / 1H /
+      // 4H / deep daily feed the multi-timeframe trim, same as ATLAS
       atlasFetchKlines(sym, '240', 500).then(function(c){ st.atlas4h = c; }),
+      atlasFetchKlines(sym, '30', 500).then(function(c){ st.atlas30m = c; }),
+      atlasFetchKlines(sym, '60', 500).then(function(c){ st.atlas1h = c; }),
       atlasFetchKlines(sym, 'D', 400).then(function(c){ st.atlasDaily = c; }),
       atlasApi('/v5/market/open-interest?category=linear&symbol=' + sym + '&intervalTime=1h&limit=24')
         .then(function(r){ st.atlasOi = r.list.slice().reverse(); })
@@ -1619,7 +1620,9 @@
   }
 
   /* Re-fetches everything and rescoring for one symbol — called whenever its
-     1H candle closes, the same moment the CE side already recomputes.
+     1H candle closes, the same moment the CE side already recomputes (the
+     4H score only moves on a 4H close, but its live price and flow inputs
+     refresh every hour, as they do on ATLAS).
      announce flows straight into the single atlasRecompute call inside
      atlasLoadAll — an earlier version called atlasRecompute a second time
      here, which meant the flip had already been silently applied by the
@@ -1634,8 +1637,9 @@
     var fundingRate = st.ticker.fundingRate != null && st.ticker.fundingRate !== '' ? +st.ticker.fundingRate : null;
     st.atlasHadTicker = !isNaN(livePrice);
     var result = AtlasScore.compute({
-      candles1h: st.atlasCandles,
+      candles: st.atlas4h,
       candles30m: st.atlas30m,
+      candles1h: st.atlas1h,
       candles4h: st.atlas4h,
       dailyCandles: st.atlasDaily,
       livePrice: isNaN(livePrice) ? undefined : livePrice,
