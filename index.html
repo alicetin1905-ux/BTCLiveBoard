@@ -284,10 +284,15 @@
   @keyframes railWarn{ 0%,100%{ opacity: 1; } 50%{ opacity: 0.4; } }
 
   /* ---------------- tiles ---------------- */
+  /* 24 coins don't fit under the hero, so the grid scrolls inside its own
+     box and the hero keeps the rest of the screen */
   .tiles{
-    display: grid; grid-template-columns: repeat(4, minmax(0,1fr));
+    display: grid; grid-template-columns: repeat(6, minmax(0,1fr));
     gap: max(8px, calc(var(--u) * 1.1));
-    padding-top: max(10px, calc(var(--u) * 1.4));
+    margin-top: max(10px, calc(var(--u) * 1.4));
+    flex: 0 1 auto; min-height: 0; max-height: 38vh;
+    overflow-y: auto; overscroll-behavior: contain;
+    padding: 2px 2px 4px;
   }
   .tile{
     display: flex; flex-direction: column; gap: 5px;
@@ -299,7 +304,7 @@
     font-family: inherit; color: inherit;
     transition: background 0.2s ease, transform 0.2s ease;
   }
-  .tile:hover{ background: var(--surface-2); transform: translateY(-2px); }
+  .tile:hover{ background: var(--surface-2); }
   .tile:focus-visible{ outline: 2px solid var(--signal); outline-offset: 2px; }
   .tile-top{ display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .tile-sym{
@@ -382,7 +387,10 @@
   .error-note.show{ display: block; }
 
   @media (max-width: 700px){
-    .tiles{ grid-template-columns: repeat(2, minmax(0,1fr)); }
+    .tiles{ grid-template-columns: repeat(3, minmax(0,1fr)); gap: 6px; }
+    .tile{ padding: 7px 8px; gap: 3px; }
+    .tile-price{ font-size: 14px; }
+    .tile-state{ font-size: 8px; letter-spacing: 0.08em; }
     .signal-block{ width: 100%; }
     .signal-meta{ text-align: left; }
     .price{ font-size: max(40px, calc(var(--u) * 14)); }
@@ -482,14 +490,33 @@
   var WS_URL = 'wss://stream.bybit.com/v5/public/linear';
   var STALE_MS = 12000;
 
+  // same 25 coins TradeBot trades, in its order
   var SYMBOLS = [
-    { sym: 'BTCUSDT',  label: 'BTC',  decimals: 1 },
-    { sym: 'ETHUSDT',  label: 'ETH',  decimals: 2 },
-    { sym: 'SOLUSDT',  label: 'SOL',  decimals: 2 },
-    { sym: 'XRPUSDT',  label: 'XRP',  decimals: 4 },
-    { sym: 'BNBUSDT',  label: 'BNB',  decimals: 2 },
-    { sym: 'DOGEUSDT', label: 'DOGE', decimals: 5 },
-    { sym: 'HYPEUSDT', label: 'HYPE', decimals: 3 }
+    { sym: 'BTCUSDT',      label: 'BTC',      decimals: 1 },
+    { sym: 'ETHUSDT',      label: 'ETH',      decimals: 2 },
+    { sym: 'SOLUSDT',      label: 'SOL',      decimals: 2 },
+    { sym: 'XRPUSDT',      label: 'XRP',      decimals: 4 },
+    { sym: 'BNBUSDT',      label: 'BNB',      decimals: 2 },
+    { sym: 'DOGEUSDT',     label: 'DOGE',     decimals: 5 },
+    { sym: 'HYPEUSDT',     label: 'HYPE',     decimals: 3 },
+    { sym: 'SUIUSDT',      label: 'SUI',      decimals: 4 },
+    { sym: 'ENAUSDT',      label: 'ENA',      decimals: 5 },
+    { sym: 'WLDUSDT',      label: 'WLD',      decimals: 4 },
+    { sym: 'DYDXUSDT',     label: 'DYDX',     decimals: 5 },
+    { sym: 'LDOUSDT',      label: 'LDO',      decimals: 4 },
+    { sym: 'GALAUSDT',     label: 'GALA',     decimals: 6 },
+    { sym: 'KAITOUSDT',    label: 'KAITO',    decimals: 4 },
+    { sym: 'FARTCOINUSDT', label: 'FARTCOIN', decimals: 4 },
+    { sym: 'EGLDUSDT',     label: 'EGLD',     decimals: 3 },
+    { sym: 'NEARUSDT',     label: 'NEAR',     decimals: 3 },
+    { sym: 'XLMUSDT',      label: 'XLM',      decimals: 5 },
+    { sym: 'BLURUSDT',     label: 'BLUR',     decimals: 5 },
+    { sym: 'SANDUSDT',     label: 'SAND',     decimals: 5 },
+    { sym: 'AXSUSDT',      label: 'AXS',      decimals: 4 },
+    { sym: 'ZILUSDT',      label: 'ZIL',      decimals: 6 },
+    { sym: 'TRXUSDT',      label: 'TRX',      decimals: 5 },
+    { sym: 'CHZUSDT',      label: 'CHZ',      decimals: 5 },
+    { sym: 'POPCATUSDT',   label: 'POPCAT',   decimals: 5 }
   ];
 
   var heroSymbol = 'BTCUSDT';
