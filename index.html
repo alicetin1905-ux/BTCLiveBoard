@@ -616,9 +616,10 @@
      atr, ...) collide with this file's own same-named CE-specific versions
      above, which stay untouched and keep driving the chart + stop rail.
 
-     Trade-plan/sizing and the multi-timeframe-alignment panel are dropped —
-     neither feeds the score in ATLAS either (mtf is display-only there) —
-     leaving just what's needed for { score, dir }.
+     Trade-plan/sizing is dropped (it doesn't feed the score), leaving just
+     what's needed for { score, dir }. The multi-timeframe read DOES feed
+     ATLAS's score (it trims it on disagreement), so 30m and 4H candles
+     are fetched here too, and daily history deep enough for its 1D read.
 
      Keep this in sync by hand if ATLAS's analyse() ever changes; there is no
      shared module between the two static, independently-deployed repos.
@@ -816,14 +817,6 @@
         dn: b.map(function (x, i) { return nn(x) ? x - m * s[i] : null; })
       };
     }
-    function keltner(c, p, m) {
-      var mid = ema(c.map(function (x) { return x.c; }), p), a = atr(c, p);
-      return {
-        mid: mid,
-        up: mid.map(function (x, i) { return nn(x) && nn(a[i]) ? x + m * a[i] : null; }),
-        dn: mid.map(function (x, i) { return nn(x) && nn(a[i]) ? x - m * a[i] : null; })
-      };
-    }
     function ichimoku(c) {
       var n = c.length, h = c.map(function (x) { return x.h; }), l = c.map(function (x) { return x.l; });
       var mid = function (p) { var hi = highest(h, p), lo = lowest(l, p); return hi.map(function (x, i) { return nn(x) ? (x + lo[i]) / 2 : null; }); };
@@ -862,12 +855,28 @@
       return { dir: dir };
     }
 
-    /* ---- weighted verdict, mirroring ATLAS's analyse() Trend/Momentum/
-       Structure/Flow blocks and aggregate exactly (same signals, same
-       weights, same thresholds) — trade-plan/sizing/MTF panel dropped since
-       only { score, dir } is needed here. Any Flow input left null/empty is
+    /* ---- weighted verdict, mirroring ATLAS's analyse() exactly: same
+       signals, same weights, same graded strengths, same group blend and
+       multi-timeframe trim — trade plan/sizing dropped since only
+       { score, dir } is needed here. Any Flow input left null/empty is
        simply skipped, exactly like ATLAS does when that data hasn't loaded
-       yet — the score still computes from whatever is available. ---- */
+       yet. ---- */
+    var GROUP_WEIGHTS = { Trend: 0.35, Momentum: 0.25, Structure: 0.20, Flow: 0.20 };
+    var MTF_MAX_TRIM = 0.35;
+
+    /* ATLAS's per-timeframe alignment read (EMA200, EMA50>200, CE, RSI>50) */
+    function mtfRead(cc2) {
+      if (!cc2 || cc2.length < 210) return null;
+      var kk = cc2.slice(0, -1), j = kk.length - 1, cl = kk.map(function (x) { return x.c; });
+      var a50 = ema(cl, 50)[j], a200 = ema(cl, 200)[j];
+      var s = 0;
+      s += cl[j] > a200 ? 1 : -1;
+      s += a50 > a200 ? 1 : -1;
+      s += chandelier(kk, 4, 2).dir[j];
+      s += rsi(cl, 14)[j] > 50 ? 1 : -1;
+      return s;
+    }
+
     function compute(inputs) {
       var c = inputs.candles1h;
       if (!c || c.length < 220) return null;
@@ -875,70 +884,84 @@
       var i = k.length - 1;
       var close = k.map(function (x) { return x.c; });
       var price = inputs.livePrice || k[i].c;
+      var a14 = atr(k, 14)[i];
       var sig = [];
-      var add = function (dir, weight) { sig.push({ dir: dir, weight: weight }); };
+      /* dir is the -1/0/+1 read; v is the graded -1..+1 strength the score
+         uses (defaults to dir for on/off state signals) */
+      var add = function (group, dir, weight, v) {
+        sig.push({ group: group, dir: dir, weight: weight, v: v === undefined ? dir : v });
+      };
+      var clamp1 = function (x) { return isFinite(x) ? Math.max(-1, Math.min(1, x)) : 0; };
+      var atrs = function (d, n) { return clamp1(d / (n * a14)); };
 
+      /* --- trend --- */
       var e20 = ema(close, 20), e50 = ema(close, 50), e200 = ema(close, 200);
       var stacked = e20[i] > e50[i] && e50[i] > e200[i] ? 1 : (e20[i] < e50[i] && e50[i] < e200[i] ? -1 : 0);
-      add(stacked, 8);
-      add(price > e200[i] ? 1 : -1, 6);
+      add('Trend', stacked, 8);
+      add('Trend', price > e200[i] ? 1 : -1, 6, atrs(price - e200[i], 3));
 
       var st = supertrend(k, 10, 3);
-      add(st.dir[i], 7);
+      add('Trend', st.dir[i], 7);
 
       var ce = chandelier(k, 4, 2);
-      add(ce.dir[i], 7);
+      add('Trend', ce.dir[i], 7);
 
       var zl = zlsma(close, 32);
       var zlDir = price > zl[i] ? 1 : -1;
       var zlSlope = zl[i] > zl[i - 3] ? 1 : -1;
-      add(zlDir === zlSlope ? zlDir : 0, 5);
+      add('Trend', zlDir === zlSlope ? zlDir : 0, 5);
 
       var dm = adx(k, 14);
       var adxV = dm.adx[i];
-      add(adxV < 20 ? 0 : (dm.pdi[i] > dm.ndi[i] ? 1 : -1), 5);
+      var diDir = dm.pdi[i] > dm.ndi[i] ? 1 : -1;
+      add('Trend', adxV < 20 ? 0 : diDir, 5, adxV < 20 ? 0 : diDir * Math.min(1, (adxV - 20) / 20));
 
       var ich = ichimoku(k);
       var ichDir = 0;
       if (nn(ich.cloudTop)) ichDir = price > ich.cloudTop ? 1 : price < ich.cloudBot ? -1 : 0;
-      add(ichDir, 5);
+      add('Trend', ichDir, 5);
 
+      /* --- momentum --- */
       var r14 = rsi(close, 14);
-      add(r14[i] > 55 ? 1 : r14[i] < 45 ? -1 : 0, 6);
-      var md = macd(close, 12, 26, 9);
+      add('Momentum', r14[i] > 55 ? 1 : r14[i] < 45 ? -1 : 0, 6, clamp1((r14[i] - 50) / 20));
+      var md = macd(close, 5, 35, 5);
       var mdDir = md.line[i] > md.signal[i] ? 1 : -1;
-      add((md.hist[i] > 0 ? 1 : -1) === mdDir ? mdDir : 0, 7);
+      var hRecent = md.hist.slice(Math.max(0, i - 49), i + 1).filter(nn);
+      var hScale = hRecent.reduce(function (s, x) { return s + Math.abs(x); }, 0) / (hRecent.length || 1);
+      add('Momentum', (md.hist[i] > 0 ? 1 : -1) === mdDir ? mdDir : 0, 7, clamp1(md.hist[i] / (2 * hScale)));
       var sr = stochRsi(close, 14, 14, 3, 3);
-      add(sr.k[i] > sr.d[i] && sr.k[i] < 80 ? 1 : sr.k[i] < sr.d[i] && sr.k[i] > 20 ? -1 : 0, 4);
+      var srGap = clamp1((sr.k[i] - sr.d[i]) / 15);
+      add('Momentum', sr.k[i] > sr.d[i] && sr.k[i] < 80 ? 1 : sr.k[i] < sr.d[i] && sr.k[i] > 20 ? -1 : 0, 4,
+        (sr.k[i] >= 80 && srGap > 0) || (sr.k[i] <= 20 && srGap < 0) ? 0 : srGap);
       var cc = cci(k, 20);
-      add(cc[i] > 100 ? 1 : cc[i] < -100 ? -1 : 0, 3);
+      add('Momentum', cc[i] > 100 ? 1 : cc[i] < -100 ? -1 : 0, 3, clamp1(cc[i] / 200));
       var wr = willr(k, 14);
-      add(wr[i] > -50 ? 1 : -1, 3);
+      add('Momentum', wr[i] > -50 ? 1 : -1, 3, clamp1((wr[i] + 50) / 30));
       var roc = (close[i] / close[i - 10] - 1) * 100;
-      add(roc > 0.3 ? 1 : roc < -0.3 ? -1 : 0, 3);
+      add('Momentum', roc > 0.3 ? 1 : roc < -0.3 ? -1 : 0, 3, atrs(close[i] - close[i - 10], 3));
 
-      var bb = bollinger(close, 20, 2), kc = keltner(k, 20, 1.5);
+      /* --- structure --- (TTM squeeze is display-only in ATLAS, weight 0) */
+      var bb = bollinger(close, 20, 2);
       var pctB = (price - bb.dn[i]) / (bb.up[i] - bb.dn[i]);
-      add(pctB > 0.55 ? 1 : pctB < 0.45 ? -1 : 0, 3);
-      add(0, 2);   /* TTM squeeze — always neutral, dilutes the denominator like ATLAS */
+      add('Structure', pctB > 0.55 ? 1 : pctB < 0.45 ? -1 : 0, 3, clamp1((pctB - 0.5) / 0.5));
       var str = structure(k);
-      add(str.dir, 6);
+      add('Structure', str.dir, 6);
       var vw = vwapAnchored(k);
-      add(price > vw[i] ? 1 : -1, 4);
+      add('Structure', price > vw[i] ? 1 : -1, 4, atrs(price - vw[i], 2));
 
       var d1 = inputs.dailyCandles;
       if (d1 && d1.length > 2) {
         var p = d1[d1.length - 2];
         var P = (p.h + p.l + p.c) / 3;
-        add(price > P ? 1 : -1, 3);
+        add('Structure', price > P ? 1 : -1, 3, atrs(price - P, 2));
       }
 
-      var vAvg = sma(k.map(function (x) { return x.v; }), 20)[i];
-      add(0, 3);   /* Volume vs 20-avg — always neutral, same as ATLAS */
+      /* --- flow --- (volume ratio is display-only in ATLAS, weight 0) */
       var ob = obv(k);
-      add(ob[i] > ob[i - 10] ? 1 : -1, 4);
+      var vol10 = 0; for (var j = i - 9; j <= i; j++) vol10 += k[j].v;
+      add('Flow', ob[i] > ob[i - 10] ? 1 : -1, 4, clamp1((ob[i] - ob[i - 10]) / vol10));
       var mf = mfi(k, 14);
-      add(mf[i] > 55 ? 1 : mf[i] < 45 ? -1 : 0, 3);
+      add('Flow', mf[i] > 55 ? 1 : mf[i] < 45 ? -1 : 0, 3, clamp1((mf[i] - 50) / 25));
 
       if (nn(inputs.fundingRate)) {
         var f = inputs.fundingRate * 100;
@@ -947,7 +970,7 @@
         else if (f < -0.02) fDir = 1;
         else if (f > 0.005) fDir = 1;
         else if (f < -0.005) fDir = -1;
-        add(fDir, 5);
+        add('Flow', fDir, 5);
       }
       if (inputs.oi && inputs.oi.length > 5) {
         var oiNow = +inputs.oi[inputs.oi.length - 1].openInterest;
@@ -957,29 +980,43 @@
         var oiDir = 0;
         if (oiChg > 0.5 && pChg > 0) oiDir = 1;
         else if (oiChg > 0.5 && pChg < 0) oiDir = -1;
-        add(oiDir, 5);
+        add('Flow', oiDir, 5);
       }
       if (inputs.ratio) {
         var lr = +inputs.ratio.buyRatio, sr2 = +inputs.ratio.sellRatio;
         var skew = lr / (lr + sr2);
-        add(skew > 0.72 ? -1 : skew < 0.45 ? 1 : 0, 3);
+        add('Flow', skew > 0.72 ? -1 : skew < 0.45 ? 1 : 0, 3);
       }
       if (inputs.book) {
         var bid = inputs.book.b.reduce(function (s, x) { return s + +x[1]; }, 0);
         var ask = inputs.book.a.reduce(function (s, x) { return s + +x[1]; }, 0);
         var imb = (bid - ask) / (bid + ask);
-        add(imb > 0.08 ? 1 : imb < -0.08 ? -1 : 0, 3);
+        add('Flow', imb > 0.08 ? 1 : imb < -0.08 ? -1 : 0, 3, clamp1(imb / 0.25));
       }
       if (inputs.tape) {
         var buy = inputs.tape.filter(function (t) { return t.S === 'Buy'; }).reduce(function (s, t) { return s + +t.v; }, 0);
         var sell = inputs.tape.filter(function (t) { return t.S === 'Sell'; }).reduce(function (s, t) { return s + +t.v; }, 0);
         var tot = buy + sell, pct = tot ? buy / tot : 0.5;
-        add(pct > 0.55 ? 1 : pct < 0.45 ? -1 : 0, 3);
+        add('Flow', pct > 0.55 ? 1 : pct < 0.45 ? -1 : 0, 3, clamp1((pct - 0.5) / 0.15));
       }
 
-      var wsum = 0, totw = 0;
-      sig.forEach(function (s) { wsum += s.weight; totw += s.dir * s.weight; });
-      var score = Math.round(totw / wsum * 100);
+      /* --- aggregate: each group averaged, then blended at fixed shares --- */
+      var gsum = 0, gtot = 0;
+      Object.keys(GROUP_WEIGHTS).forEach(function (g) {
+        var w = 0, t = 0;
+        sig.forEach(function (s) { if (s.group === g) { w += s.weight; t += s.v * s.weight; } });
+        if (!w) return;
+        gsum += GROUP_WEIGHTS[g]; gtot += GROUP_WEIGHTS[g] * (t / w);
+      });
+      var raw = gsum ? gtot / gsum : 0;
+
+      /* --- multi-timeframe trim: 30m / 1H / 4H / 1D, only those with data --- */
+      var reads = [inputs.candles30m, c, inputs.candles4h, inputs.dailyCandles].map(mtfRead)
+        .filter(function (x) { return x !== null; });
+      var lean = reads.length ? reads.reduce(function (s, x) { return s + x / 4; }, 0) / reads.length : 0;
+      var factor = 1 - MTF_MAX_TRIM * Math.max(0, -lean * Math.sign(raw));
+
+      var score = Math.round(raw * factor * 100);
       var dir = score >= 25 ? 1 : score <= -25 ? -1 : 0;
       return { score: score, dir: dir };
     }
@@ -1531,7 +1568,10 @@
     var st = state[sym];
     return Promise.all([
       atlasFetchKlines(sym, INTERVAL, 500).then(function(c){ st.atlasCandles = c; }),
-      atlasFetchKlines(sym, 'D', 30).then(function(c){ st.atlasDaily = c; }),
+      // 30m / 4H / deep daily feed the multi-timeframe trim, same as ATLAS
+      atlasFetchKlines(sym, '30', 500).then(function(c){ st.atlas30m = c; }),
+      atlasFetchKlines(sym, '240', 500).then(function(c){ st.atlas4h = c; }),
+      atlasFetchKlines(sym, 'D', 400).then(function(c){ st.atlasDaily = c; }),
       atlasApi('/v5/market/open-interest?category=linear&symbol=' + sym + '&intervalTime=1h&limit=24')
         .then(function(r){ st.atlasOi = r.list.slice().reverse(); })
         .catch(function(){ st.atlasOi = []; }),
@@ -1561,8 +1601,11 @@
     var st = state[sym];
     var livePrice = parseFloat(st.ticker.lastPrice);
     var fundingRate = st.ticker.fundingRate != null && st.ticker.fundingRate !== '' ? +st.ticker.fundingRate : null;
+    st.atlasHadTicker = !isNaN(livePrice);
     var result = AtlasScore.compute({
       candles1h: st.atlasCandles,
+      candles30m: st.atlas30m,
+      candles4h: st.atlas4h,
       dailyCandles: st.atlasDaily,
       livePrice: isNaN(livePrice) ? undefined : livePrice,
       fundingRate: fundingRate,
@@ -1668,6 +1711,10 @@
         var tsym = msg.topic.slice(8);
         if (!state[tsym]) return;
         Object.assign(state[tsym].ticker, msg.data);
+        /* the boot score is computed before the socket even connects, so it
+           has no live price or funding rate — rescore once when they arrive
+           instead of waiting up to an hour for the next 1H close */
+        if (state[tsym].atlasReady && !state[tsym].atlasHadTicker) atlasRecompute(tsym, false);
         lastTickerTs = Date.now();
         setStatus('live');
         els.price.classList.remove('stale');
